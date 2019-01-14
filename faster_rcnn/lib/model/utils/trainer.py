@@ -43,7 +43,18 @@ import pdb
 import copy
 import math
 
+def count_para(model):
+	num = 0
+	for p in model.parameters():
+		n = 1
+		for s in p.shape:
+			n *= s
+		num += n
+	return num
+
 def trainer(model, dataloader, optimizer, args):
+
+	name_to_save = args.save_model[:-4] if args.save_model[-4:] == '.pth' else args.save_model
 
 	fasterRCNN = model
 	fasterRCNN.train()
@@ -75,12 +86,13 @@ def trainer(model, dataloader, optimizer, args):
 		from tensorboardX import SummaryWriter
 		logger = SummaryWriter("logs")
 
+	avg_rpn_cls, avg_rpn_bbox, avg_rcnn_cls, avg_rcnn_bbox = AverageMeter(), AverageMeter(), AverageMeter(), AverageMeter()
 	for epoch in range(args.start_epoch, args.max_epochs + 1):
 		# setting to train mode
 		fasterRCNN.train()
 		loss_temp = 0
 		start = time.time()
-		#current_mAP = evaluator(copy.deepcopy(fasterRCNN.module), args, evl_rec = True)
+		# current_mAP = evaluator(copy.deepcopy(fasterRCNN.module), args, evl_rec=evl_rec)
 		if epoch % (args.lr_decay_step + 1) == 0:
 				adjust_learning_rate(optimizer, args.lr_decay_gamma)
 				lr *= args.lr_decay_gamma
@@ -99,8 +111,7 @@ def trainer(model, dataloader, optimizer, args):
 			rpn_loss_cls, rpn_loss_box, \
 			RCNN_loss_cls, RCNN_loss_bbox, \
 			rois_label= fasterRCNN(im_data, im_info, gt_boxes, num_boxes)
-
-			#pdb.set_trace()
+			
 			if args.evl_rec:
 				loss = rpn_loss_cls.mean() + rpn_loss_box.mean() 
 			else:
@@ -108,11 +119,16 @@ def trainer(model, dataloader, optimizer, args):
 						 + RCNN_loss_cls.mean() + RCNN_loss_bbox.mean()
 
 			loss_temp += loss.item()
+			avg_rpn_cls.update(rpn_loss_cls.mean().item())
+			avg_rpn_bbox.update(rpn_loss_box.mean().item())
+			avg_rcnn_cls.update(RCNN_loss_cls.mean().item())
+			avg_rcnn_bbox.update(RCNN_loss_bbox.mean().item())
 
 			# backward
 			optimizer.zero_grad()
 			loss.backward()
-			if args.net == "vgg16":
+
+			if args.net in ('vgg16, inception'):
 					clip_gradient(fasterRCNN, 10.)
 			optimizer.step()
 
@@ -141,10 +157,16 @@ def trainer(model, dataloader, optimizer, args):
 				print("\t\t\tfg/bg=(%d/%d), time cost: %f" % (fg_cnt, bg_cnt, end-start))
 				if args.evl_rec:
 					print("\t\t\trpn_cls: %.4f, rpn_box: %.4f" \
-												% (loss_rpn_cls, loss_rpn_box))
+												% (avg_rpn_cls.avg, avg_rpn_bbox.avg))
 				else:
 					print("\t\t\trpn_cls: %.4f, rpn_box: %.4f, rcnn_cls: %.4f, rcnn_box %.4f" \
-												% (loss_rpn_cls, loss_rpn_box, loss_rcnn_cls, loss_rcnn_box))				
+												% (avg_rpn_cls.avg, avg_rpn_bbox.avg, avg_rcnn_cls.avg, avg_rcnn_bbox.avg))	
+
+				avg_rpn_bbox.clear()
+				avg_rpn_cls.clear()
+				avg_rcnn_cls.clear()
+				avg_rcnn_bbox.clear()
+
 				if args.use_tfboard:
 					info = {
 						'loss': loss_temp,
@@ -160,7 +182,7 @@ def trainer(model, dataloader, optimizer, args):
 				start = time.time()
 		
 		output_dir = args.save_dir + "/" + args.net + "/" + args.dataset
-		save_name = os.path.join(output_dir, 'tiny_faster_rcnn_curr.pth')
+		save_name = os.path.join(output_dir, name_to_save+'_curr.pth')
 		save_checkpoint({
 			'session': args.session,
 			'epoch': epoch + 1,
@@ -171,25 +193,27 @@ def trainer(model, dataloader, optimizer, args):
 		}, save_name)
 		print('save current model: {}'.format(save_name))
 		
-		print('Finish epoch {}, now evaluate model performance...\r\n'.format(epoch))
-		current_mAP = evaluator(copy.deepcopy(fasterRCNN.module), args, evl_rec=evl_rec)
+		if epoch >= 5:
+			print('Finish epoch {}, now evaluate model performance...\r\n'.format(epoch))
+			current_mAP = evaluator(copy.deepcopy(fasterRCNN.module), args, evl_rec=evl_rec)
 
-		if evl_rec:
-			print('In epoch {}, recall = {:.4f}'.format(epoch, current_mAP))
-		else:
-			print('In epoch {}, mAP = {:.4f}'.format(epoch, current_mAP))
-		
-		if current_mAP > best_mAP:
-			save_name = os.path.join(output_dir, 'tiny_faster_rcnn_best.pth')
-			save_checkpoint({
-				'session': args.session,
-				'epoch': epoch + 1,
-				'model': fasterRCNN.module.state_dict() if args.mGPUs else fasterRCNN.state_dict(),
-				'optimizer': optimizer.state_dict(),
-				'pooling_mode': cfg.POOLING_MODE,
-				'class_agnostic': args.class_agnostic,
-			}, save_name)
-			print('save best model: {}'.format(save_name))
+			if evl_rec:
+				print('In epoch {}, recall = {:.4f}, best recall = {:.4f}'.format(epoch, current_mAP, best_mAP))
+			else:
+				print('In epoch {}, mAP = {:.4f}, best mAP = {:.4f}'.format(epoch, current_mAP, best_mAP))
+			
+			if current_mAP > best_mAP:
+				best_mAP = current_mAP
+				save_name = os.path.join(output_dir, name_to_save+'_best.pth')
+				save_checkpoint({
+					'session': args.session,
+					'epoch': epoch + 1,
+					'model': fasterRCNN.module.state_dict() if args.mGPUs else fasterRCNN.state_dict(),
+					'optimizer': optimizer.state_dict(),
+					'pooling_mode': cfg.POOLING_MODE,
+					'class_agnostic': args.class_agnostic,
+				}, save_name)
+				print('save best model: {}'.format(save_name))
 
 	if args.use_tfboard:
 		logger.close()
@@ -197,6 +221,8 @@ def trainer(model, dataloader, optimizer, args):
 def mm_trainer(model, student_model, dataloader, optimizer, args):
 	# mimicking implementation
 	# a module for training student network
+
+	name_to_save = args.save_model[:-4] if args.save_model[-4:] == '.pth' else args.save_model
 	CROP_WIDTH, CROP_HEIGHT = 50, 50
 
 	evl_rec = args.evl_rec
@@ -207,7 +233,8 @@ def mm_trainer(model, student_model, dataloader, optimizer, args):
 	student_net = student_model
 	student_net.train()
 
-	best_mAP = 0
+	best_mAP = 0.0
+	best_recall = 0.0
 	lr = args.lr
 
 	# initilize the tensor holder here.
@@ -233,14 +260,15 @@ def mm_trainer(model, student_model, dataloader, optimizer, args):
 		from tensorboardX import SummaryWriter
 		logger = SummaryWriter("logs")
 
-	avg_mse_loss = AverageMeter()
-	#curr_recall = evaluator(copy.deepcopy(student_net.module), args, evl_rec=True)
+	avg_mse_loss, avg_rpn_cls, avg_rpn_bbox = AverageMeter(), AverageMeter(), AverageMeter()
+	#curr_recall = evaluator(copy.deepcopy(fasterRCNN.module), args, evl_rec=True)
+
 	for epoch in range(args.start_epoch, args.max_epochs + 1):
 		# setting to train mode
 		student_net.train()
 		loss_temp = 0
 		start = time.time()
-		#current_mAP = evaluator(copy.deepcopy(fasterRCNN.module), args, evl_rec = True)
+		# current_mAP = evaluator(copy.deepcopy(student_net.module), args, evl_rec = True)
 		if epoch % (args.lr_decay_step + 1) == 0:
 				adjust_learning_rate(optimizer, args.lr_decay_gamma)
 				lr *= args.lr_decay_gamma
@@ -267,70 +295,58 @@ def mm_trainer(model, student_model, dataloader, optimizer, args):
 			RCNN_loss_cls, RCNN_loss_bbox, \
 			rois_label, std_base_feat, std_pooled_feat = student_net(im_data, im_info, gt_boxes, num_boxes)
 
+			#rois, base_feat = torch.zeros(std_rois.shape).cuda(), torch.zeros(std_base_feat.shape).cuda()
 			base_feat, pooled_feat = base_feat.detach(), pooled_feat.detach()
-			
-			# # perform rois mimicking
-			# std_feat, tch_feat = [], []
-			# for i in range(im_data.shape[0]):
-			# 	std_img_feat, tch_img_feat = [], []
-			# 	dy, dx = base_feat.shape[2], base_feat.shape[3]
-			# 	for j in range(std_rois.shape[1]):
 
-			# 		x1, y1, x2, y2 = int(std_rois[i][j][1].item()/16),\
-			# 						 int(std_rois[i][j][2].item()/16),\
-			# 						 int(std_rois[i][j][3].item()/16),\
-			# 						 int(std_rois[i][j][4].item()/16)
-					
-			# 		x2, y2 = min(x2, x1+CROP_WIDTH-1), min(y2, y1+CROP_HEIGHT-1)
+			if False:
+				from model.roi_align.modules.roi_align import RoIAlignAvg
+				RCNN_roi_align = RoIAlignAvg(cfg.POOLING_SIZE, cfg.POOLING_SIZE, 1.0/16.0)
+				pooled_feat = RCNN_roi_align(base_feat, std_rois.view(-1, 5)).detach()
 
-			# 		if x2>dx or x1>dx or y2>dy or y1>dy:
-			# 		 	pdb.set_trace()
+				MSELoss = nn.MSELoss()
+				mse_loss = MSELoss(std_pooled_feat, pooled_feat)
+				#pdb.set_trace()
+			else:
+				std_feat, tch_feat = [], []
+				for i in range(im_data.shape[0]):
+					std_img_feat, tch_img_feat = [], []
+					dy, dx = base_feat.shape[2], base_feat.shape[3]
+					for j in range(std_rois.shape[1]):
 
-			# 		m = nn.ConstantPad2d((0, CROP_WIDTH-(x2-x1+1), 0, CROP_HEIGHT-(y2-y1+1)), 0)
-					
-			# 		std_img_feat.append(m(std_base_feat[i][:, y1:y2+1, x1:x2+1]))
-			# 		tch_img_feat.append(m(base_feat[i][:, y1:y2+1, x1:x2+1]))
-					
-			# 	std_feat.append(torch.stack(std_img_feat))
-			# 	tch_feat.append(torch.stack(tch_img_feat))
-				
-			# std_feat, tch_feat = torch.stack(std_feat), torch.stack(tch_feat)
+						stride = 16 if args.net != 'inception' else 17
+						x1, y1, x2, y2 = int(std_rois[i][j][1].item()/stride),\
+										 int(std_rois[i][j][2].item()/stride),\
+										 int(std_rois[i][j][3].item()/stride),\
+										 int(std_rois[i][j][4].item()/stride)
 
-			# perform rois mimicking
-			std_feat, tch_feat = [], []
-			for i in range(im_data.shape[0]):
-				std_img_feat, tch_img_feat = [], []
-				dy, dx = base_feat.shape[2], base_feat.shape[3]
-				for j in range(std_rois.shape[1]):
+						if x2>dx or x1>dx or y2>dy or y1>dy:
+						 	pdb.set_trace()
+						
+						if y2>y1 and x2>x1:
+							std_img_feat.append(std_base_feat[i][:, y1:y2+1, x1:x2+1])
+							tch_img_feat.append(base_feat[i][:, y1:y2+1, x1:x2+1])
+						
+					std_feat.append(std_img_feat)
+					tch_feat.append(tch_img_feat)
 
-					x1, y1, x2, y2 = int(std_rois[i][j][1].item()/16),\
-									 int(std_rois[i][j][2].item()/16),\
-									 int(std_rois[i][j][3].item()/16),\
-									 int(std_rois[i][j][4].item()/16)
+				MSELoss = nn.MSELoss()
+				mse_loss = torch.zeros(1).cuda() if args.cuda else torch.zeros(1)
+				for i in range(len(std_feat)):
+					for j in range(len(std_feat[i])):
+						if math.isnan(MSELoss(std_feat[i][j], tch_feat[i][j]).item()):
+							pdb.set_trace()
+						mse_loss += MSELoss(std_feat[i][j], tch_feat[i][j])
+						# print(mse_loss, std_feat[i][j].shape, tch_feat[i][j].shape)
+						# pdb.set_trace()
+				mse_loss /= (std_rois.shape[0]*std_rois.shape[1])
 
-					if x2>dx or x1>dx or y2>dy or y1>dy:
-					 	pdb.set_trace()
-					
-					std_img_feat.append(std_base_feat[i][:, y1:y2+1, x1:x2+1])
-					tch_img_feat.append(base_feat[i][:, y1:y2+1, x1:x2+1])
-					
-				std_feat.append(std_img_feat)
-				tch_feat.append(tch_img_feat)
 
-			MSELoss = nn.MSELoss()
-			mse_loss = torch.zeros(1).cuda() if args.cuda else torch.zeros(1)
-			for i in range(len(std_feat)):
-				for j in range(len(std_feat[i])):
-					if math.isnan(MSELoss(std_feat[i][j], tch_feat[i][j]).item()):
-						pdb.set_trace()
-					mse_loss += MSELoss(std_feat[i][j], tch_feat[i][j])
-					# print(mse_loss, std_feat[i][j].shape, tch_feat[i][j].shape)
-					# pdb.set_trace()
-			mse_loss /= (std_rois.shape[0]*std_rois.shape[1]*10)
 			avg_mse_loss.update(mse_loss.mean().item())
+			avg_rpn_cls.update(rpn_loss_cls.mean().item())
+			avg_rpn_bbox.update(rpn_loss_box.mean().item())
 
 			loss = rpn_loss_cls.mean() + rpn_loss_box.mean() + mse_loss.mean() 
-
+			
 			# loss = rpn_loss_cls.mean() + rpn_loss_box.mean() \
 			# 		 + RCNN_loss_cls.mean() + RCNN_loss_bbox.mean()
 			loss_temp += loss.item()
@@ -338,7 +354,6 @@ def mm_trainer(model, student_model, dataloader, optimizer, args):
 			# backward
 			optimizer.zero_grad()
 			loss.backward()
-
 
 			# for key, value in dict(student_net.named_parameters()).items():
 			# 	print(key, value.grad)
@@ -374,8 +389,10 @@ def mm_trainer(model, student_model, dataloader, optimizer, args):
 																% (args.session, epoch, step, len(dataloader), loss_temp, lr))
 				print("\t\t\tfg/bg=(%d/%d), time cost: %f" % (fg_cnt, bg_cnt, end-start))
 				print("\t\t\trpn_cls: %.4f, rpn_box: %.4f, MSE loss: %.4f" \
-											% (loss_rpn_cls, loss_rpn_box, avg_mse_loss.avg))
+											% (avg_rpn_cls.avg, avg_rpn_bbox.avg, avg_mse_loss.avg))
 				avg_mse_loss.clear()
+				avg_rpn_bbox.clear()
+				avg_rpn_cls.clear()
 				# print("\t\t\trpn_cls: %.4f, rpn_box: %.4f, rcnn_cls: %.4f, rcnn_box %.4f" \
 				# 							% (loss_rpn_cls, loss_rpn_box, loss_rcnn_cls, loss_rcnn_box))
 				if args.use_tfboard:
@@ -393,7 +410,7 @@ def mm_trainer(model, student_model, dataloader, optimizer, args):
 				start = time.time()
 		
 		output_dir = args.save_dir + "/" + args.net + "/" + args.dataset
-		save_name = os.path.join(output_dir, 'student_curr.pth')
+		save_name = os.path.join(output_dir, name_to_save+'_curr.pth')
 		save_checkpoint({
 			'session': args.session,
 			'epoch': epoch + 1,
@@ -406,7 +423,6 @@ def mm_trainer(model, student_model, dataloader, optimizer, args):
 		
 		print('Finish epoch {}, now evaluate model performance...\r\n'.format(epoch))
 		
-		best_recall = 0.0
 
 		if evl_rec:
 			curr_recall = evaluator(copy.deepcopy(student_net.module), args, evl_rec=True)
@@ -415,7 +431,7 @@ def mm_trainer(model, student_model, dataloader, optimizer, args):
 			print('best recal = {:.4f}'.format(best_recall))
 			if curr_recall > best_recall:
 				best_recall = curr_recall
-				save_name = os.path.join(output_dir, 'student_best.pth')
+				save_name = os.path.join(output_dir, name_to_save+'_best.pth')
 				save_checkpoint({
 					'session': args.session,
 					'epoch': epoch + 1,
@@ -432,7 +448,7 @@ def mm_trainer(model, student_model, dataloader, optimizer, args):
 		
 			if current_mAP > best_mAP:
 				best_mAP = current_mAP
-				save_name = os.path.join(output_dir, 'faster_rcnn_best.pth')
+				save_name = os.path.join(output_dir, name_to_save+'_best.pth')
 				save_checkpoint({
 					'session': args.session,
 					'epoch': epoch + 1,

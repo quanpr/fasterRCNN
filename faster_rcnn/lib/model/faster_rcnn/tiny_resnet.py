@@ -164,39 +164,39 @@ class TinyResNet(nn.Module):
 		return x
 
 
-def tiny_resnet18(pretrained=False):
+def tiny_resnet18(pretrained=False, shrink=2):
 	"""Constructs a ResNet-18 model.
 	Args:
 		pretrained (bool): If True, returns a model pre-trained on ImageNet
 	"""
-	model = TinyResNet(BasicBlock, [2, 2, 2, 2])
+	model = TinyResNet(BasicBlock, [2, 2, 2, 2], shrink=shrink)
 	return model
 
 
-def tiny_resnet34(pretrained=False):
+def tiny_resnet34(pretrained=False, shrink=2):
 	"""Constructs a ResNet-34 model.
 	Args:
 		pretrained (bool): If True, returns a model pre-trained on ImageNet
 	"""
-	model = TinyResNet(BasicBlock, [3, 4, 6, 3])
+	model = TinyResNet(BasicBlock, [3, 4, 6, 3], shrink=shrink)
 	return model
 
 
-def tiny_resnet50(pretrained=False):
+def tiny_resnet50(pretrained=False, shrink=2):
 	"""Constructs a ResNet-50 model.
 	Args:
 		pretrained (bool): If True, returns a model pre-trained on ImageNet
 	"""
-	model = TinyResNet(Bottleneck, [3, 4, 6, 3])
+	model = TinyResNet(Bottleneck, [3, 4, 6, 3], shrink=shrink)
 	return model
 
 
-def tiny_resnet101(pretrained=False):
+def tiny_resnet101(pretrained=False, shrink=2):
 	"""Constructs a ResNet-101 model.
 	Args:
 		pretrained (bool): If True, returns a model pre-trained on ImageNet
 	"""
-	model = TinyResNet(Bottleneck, [3, 4, 23, 3])
+	model = TinyResNet(Bottleneck, [3, 4, 23, 3], shrink=shrink)
 	return model
 
 
@@ -209,15 +209,27 @@ def tiny_resnet152(pretrained=False):
 	return model
 
 class tiny_resnet(_fasterRCNN):
-	def __init__(self, classes, num_layers=101, pretrained=False, class_agnostic=False, shrink=2, mimic=False):
-		self.dout_base_model = 1024//shrink
+	def __init__(self, classes, num_layers=101, pretrained=False, class_agnostic=False, shrink=2, mimic=False, layer=101):
+		self.layer = layer
+		self.dout_base_model = 256//shrink if self.layer in (18, 34) else 1024//shrink
 		self.pretrained = pretrained
 		self.class_agnostic = class_agnostic
+		self.shrink = shrink
 
 		_fasterRCNN.__init__(self, classes, class_agnostic, shrink, mimic)
 
 	def _init_modules(self):
-		resnet = tiny_resnet101(pretrained=False)
+		expansion = 1 if self.layer in (18, 34) else 4
+
+		print('tiny network backbone: resnet-{}'.format(self.layer))
+		if self.layer == 18:
+			resnet = tiny_resnet18(pretrained=False, shrink=self.shrink)
+		elif self.layer == 34:
+			resnet = tiny_resnet34(pretrained=False, shrink=self.shrink)
+		elif self.layer == 50:
+			resnet = tiny_resnet50(pretrained=False, shrink=self.shrink)
+		else:
+			resnet = tiny_resnet101(pretrained=False, shrink=self.shrink)
 		#resnet = resnet50(pretrained=False)
 
 		# Build resnet.
@@ -226,17 +238,18 @@ class tiny_resnet(_fasterRCNN):
 
 		self.RCNN_top = nn.Sequential(resnet.layer4)
 
-		self.RCNN_cls_score = nn.Linear(2048//self.shrink, self.n_classes)
+		self.RCNN_cls_score = nn.Linear(512*expansion//self.shrink, self.n_classes)
 		if self.class_agnostic:
-			self.RCNN_bbox_pred = nn.Linear(2048//self.shrink, 4)
+			self.RCNN_bbox_pred = nn.Linear(512*expansion//self.shrink, 4)
 		else:
-			self.RCNN_bbox_pred = nn.Linear(2048//self.shrink, 4 * self.n_classes)
+			self.RCNN_bbox_pred = nn.Linear(512*expansion//self.shrink, 4 * self.n_classes)
 
+		in_channels = self.dout_base_model
 		self.transf_layer = nn.Sequential(
-										nn.Conv2d(1024//self.shrink, 1024,
+										nn.Conv2d(in_channels, 256*expansion,
 											kernel_size=3, stride=1,padding=1,
 											dilation=1, bias=True),
-										nn.BatchNorm2d(1024)
+										nn.BatchNorm2d(256*expansion)
 										)
 
 		# initialize transform layer

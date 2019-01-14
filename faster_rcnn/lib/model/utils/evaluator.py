@@ -113,8 +113,12 @@ def evaluator(model, args, evl_rec=False):
 							 for _ in xrange(imdb.num_classes)]
 
 	output_dir = get_output_dir(imdb, save_name)
+
+	# These models are pytorch pretrained with RGB channel
+	rgb = True if args.net in ('res18', 'res34', 'inception') else False
+
 	dataset = roibatchLoader(roidb, ratio_list, ratio_index, 1, \
-												imdb.num_classes, training=False, normalize = False)
+												imdb.num_classes, training=False, normalize = False, rgb=rgb)
 	dataloader = torch.utils.data.DataLoader(dataset, batch_size=1,
 														shuffle=False, num_workers=0,
 														pin_memory=True)
@@ -139,7 +143,7 @@ def evaluator(model, args, evl_rec=False):
 			num_boxes.data.resize_(data[3].size()).copy_(data[3])
 
 			det_tic = time.time()
-			
+
 			rois, cls_prob, bbox_pred, \
 			rpn_loss_cls, rpn_loss_box, \
 			RCNN_loss_cls, RCNN_loss_bbox, \

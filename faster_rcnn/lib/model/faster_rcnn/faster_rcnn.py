@@ -18,7 +18,7 @@ from model.utils.net_utils import _smooth_l1_loss, _crop_pool_layer, _affine_gri
 
 class _fasterRCNN(nn.Module):
 	""" faster RCNN """
-	def __init__(self, classes, class_agnostic, shrink=1, mimic=False):
+	def __init__(self, classes, class_agnostic, shrink=1, mimic=False, rois=None):
 		super(_fasterRCNN, self).__init__()
 		self.shrink = shrink
 		self.student = True if shrink >= 2 else False
@@ -87,10 +87,10 @@ class _fasterRCNN(nn.Module):
 			pooled_feat = self.RCNN_roi_pool(base_feat, rois.view(-1,5))
 
 		# feed pooled features to top model
-		pooled_feat = self._head_to_tail(pooled_feat)
+		output_feat = self._head_to_tail(pooled_feat)
 
 		# compute bbox offset
-		bbox_pred = self.RCNN_bbox_pred(pooled_feat)
+		bbox_pred = self.RCNN_bbox_pred(output_feat)
 		if self.training and not self.class_agnostic:
 			# select the corresponding columns according to roi labels
 			bbox_pred_view = bbox_pred.view(bbox_pred.size(0), int(bbox_pred.size(1) / 4), 4)
@@ -98,7 +98,7 @@ class _fasterRCNN(nn.Module):
 			bbox_pred = bbox_pred_select.squeeze(1)
 
 		# compute object classification probability
-		cls_score = self.RCNN_cls_score(pooled_feat)
+		cls_score = self.RCNN_cls_score(output_feat)
 		cls_prob = F.softmax(cls_score, 1)
 
 		RCNN_loss_cls = torch.zeros(1).cuda() if im_data.is_cuda else torch.zeros(1)
@@ -115,10 +115,11 @@ class _fasterRCNN(nn.Module):
 		cls_prob = cls_prob.view(batch_size, rois.size(1), -1)
 		bbox_pred = bbox_pred.view(batch_size, rois.size(1), -1)
 
-		if self.mimic and self.training or not self.student and self.mimic:
-			if self.student:
+		if self.mimic and self.training or self.mimic and not self.student:
+			if self.student or self.mimic and self.training:
 				# change the base_feat of student net for mimicking
 				base_feat = self.transf_layer(base_feat)
+				#pooled_feat = self.transf_layer(pooled_feat)
 			return rois, cls_prob, bbox_pred, rpn_loss_cls, rpn_loss_bbox, RCNN_loss_cls, RCNN_loss_bbox, rois_label, base_feat, pooled_feat
 		else:
 			return rois, cls_prob, bbox_pred, rpn_loss_cls, rpn_loss_bbox, RCNN_loss_cls, RCNN_loss_bbox, rois_label
